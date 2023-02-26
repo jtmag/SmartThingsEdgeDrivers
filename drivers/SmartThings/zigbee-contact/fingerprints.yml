@@ -184,6 +184,11 @@ zigbeeManufacturer:
     manufacturer: SmartThings
     model: PGC313EU
     deviceProfileName: smartsense-multi
+  - id: Linkind
+    deviceLabel: Linkind Motion Sensor
+    manufacturer: lk
+    model: ZB-MotionSensor-D0003
+    deviceProfileName: contact-battery
 zigbeeGeneric:
   - id: "contact-generic"
     deviceLabel: "Zigbee Contact Sensor"
