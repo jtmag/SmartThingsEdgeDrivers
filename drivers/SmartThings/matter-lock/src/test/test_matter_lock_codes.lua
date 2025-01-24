@@ -28,17 +28,28 @@
 -- Mock out globals
 local test = require "integration_test"
 local capabilities = require "st.capabilities"
+test.add_package_capability("lockAlarm.yml")
 local t_utils = require "integration_test.utils"
 local json = require "st.json"
 local clusters = require "st.matter.clusters"
 local DoorLock = clusters.DoorLock
+local im = require "st.matter.interaction_model"
 local types = DoorLock.types
 local mock_device_record = {
   profile = t_utils.get_profile_definition("base-lock.yml"),
   manufacturer_info = {vendor_id = 0xcccc, product_id = 0x1},
   endpoints = {
     {
-      endpoint_id = 1,
+      endpoint_id = 2,
+      clusters = {
+        {cluster_id = clusters.Basic.ID, cluster_type = "SERVER"},
+      },
+      device_types = {
+        device_type_id = 0x0016, device_type_revision = 1, -- RootNode
+      }
+    },
+    {
+      endpoint_id = 10,
       clusters = {
         {
           cluster_id = DoorLock.ID,
@@ -56,6 +67,8 @@ local function test_init()
   local subscribe_request = DoorLock.attributes.LockState:subscribe(mock_device)
   subscribe_request:merge(clusters.PowerSource.attributes.BatPercentRemaining:subscribe(mock_device))
   subscribe_request:merge(DoorLock.events.LockUserChange:subscribe(mock_device))
+  subscribe_request:merge(DoorLock.events.LockOperation:subscribe(mock_device))
+  subscribe_request:merge(DoorLock.events.DoorLockAlarm:subscribe(mock_device))
   test.socket["matter"]:__expect_send({mock_device.id, subscribe_request})
   test.mock_device.add_test_device(mock_device)
 end
@@ -63,6 +76,15 @@ end
 test.set_test_init_function(test_init)
 
 local expect_reload_all_codes_messages = function(dev)
+  test.socket.capability:__expect_send(
+    mock_device:generate_test_message(
+      "main", capabilities.lockCodes.lockCodes(
+        json.encode({}), {visibility = {displayed = false}}
+      )
+    )
+  )
+  test.timer.__create_and_queue_test_time_advance_timer(5, "oneshot")
+  test.mock_time.advance_time(5)
   local credential = types.DlCredential({credential_type = types.DlCredentialType.PIN, credential_index = 1})
   test.socket.capability:__expect_send(
     dev:generate_test_message(
@@ -70,7 +92,7 @@ local expect_reload_all_codes_messages = function(dev)
     )
   )
   test.socket.matter:__expect_send(
-    {dev.id, DoorLock.server.commands.GetCredentialStatus(dev, 1, credential)}
+    {dev.id, DoorLock.server.commands.GetCredentialStatus(dev, 10, credential)}
   )
   test.wait_for_events()
 
@@ -79,7 +101,7 @@ local expect_reload_all_codes_messages = function(dev)
     {
       dev.id,
       DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
-        dev, 1, -- endpoint
+        dev, 10, -- endpoint
         true, --credential exists
         1,  --user_index
         nil, --creator fabric index
@@ -107,7 +129,7 @@ local expect_reload_all_codes_messages = function(dev)
     credential_index = next_credential_index,
   })
   test.socket.matter:__expect_send(
-    {dev.id, DoorLock.server.commands.GetCredentialStatus(dev, 1, credential1)}
+    {dev.id, DoorLock.server.commands.GetCredentialStatus(dev, 10, credential1)}
   )
   test.wait_for_events()
 
@@ -129,7 +151,7 @@ local expect_reload_all_codes_messages = function(dev)
     {
       dev.id,
       DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
-        dev, 1, -- endpoint
+        dev, 10, -- endpoint
         true, --credential exists
         1,    --user_index
         nil,  --creator fabric index
@@ -176,7 +198,7 @@ local function init_code_slot(slot_number, name, device)
     {
       device.id,
       DoorLock.server.commands.SetCredential(
-        mock_device, 1, -- endpoint
+        mock_device, 10, -- endpoint
         DoorLock.types.DlDataOperationType.ADD, -- operation_type
         credential, -- credential
         "1234", -- credential_data
@@ -192,7 +214,7 @@ local function init_code_slot(slot_number, name, device)
     {
       mock_device.id,
       DoorLock.client.commands.SetCredentialResponse:build_test_command_response(
-        mock_device, 1, -- endpoint_id
+        mock_device, 10, -- endpoint_id
         DoorLock.types.DlStatus.SUCCESS, -- status
         slot_number, -- user_index
         slot_number + 1 -- next_credential_index
@@ -215,9 +237,9 @@ test.register_coroutine_test(
     test.socket.capability:__expect_send(
       mock_device:generate_test_message("main", capabilities.tamperAlert.tamper.clear())
     )
-    local req = DoorLock.attributes.MaxPINCodeLength:read(mock_device, 1)
-    req:merge(DoorLock.attributes.MinPINCodeLength:read(mock_device, 1))
-    req:merge(DoorLock.attributes.NumberOfPINUsersSupported:read(mock_device, 1))
+    local req = DoorLock.attributes.MaxPINCodeLength:read(mock_device, 10)
+    req:merge(DoorLock.attributes.MinPINCodeLength:read(mock_device, 10))
+    req:merge(DoorLock.attributes.NumberOfPINUsersSupported:read(mock_device, 10))
     test.socket.matter:__expect_send({mock_device.id, req})
     expect_reload_all_codes_messages(mock_device)
   end
@@ -243,7 +265,7 @@ test.register_message_test(
       direction = "receive",
       message = {
         mock_device.id,
-        DoorLock.attributes.MinPINCodeLength:build_test_report_data(mock_device, 1, 4),
+        DoorLock.attributes.MinPINCodeLength:build_test_report_data(mock_device, 10, 4),
       },
     },
     {
@@ -264,7 +286,7 @@ test.register_message_test(
       direction = "receive",
       message = {
         mock_device.id,
-        DoorLock.attributes.MaxPINCodeLength:build_test_report_data(mock_device, 1, 4),
+        DoorLock.attributes.MaxPINCodeLength:build_test_report_data(mock_device, 10, 4),
       },
     },
     {
@@ -285,7 +307,7 @@ test.register_message_test(
       direction = "receive",
       message = {
         mock_device.id,
-        DoorLock.attributes.NumberOfPINUsersSupported:build_test_report_data(mock_device, 1, 16),
+        DoorLock.attributes.NumberOfPINUsersSupported:build_test_report_data(mock_device, 10, 16),
       },
     },
     {
@@ -296,6 +318,47 @@ test.register_message_test(
         capabilities.lockCodes.maxCodes(16, {visibility = {displayed = false}})
       ),
     },
+  }
+)
+
+test.register_message_test(
+  "SetCredential failure does not emit events", {
+    {
+      channel = "matter",
+      direction = "receive",
+      message = {
+        mock_device.id,
+        DoorLock.client.commands.SetCredentialResponse:build_test_command_response(
+          mock_device, 10, -- endpoint_id
+          DoorLock.types.DlStatus.SUCCESS, -- status
+          1, -- user_index
+          2, -- next_credential_index
+          im.InteractionResponse.Status.FAILURE
+        ),
+      },
+    }
+  }
+)
+
+test.register_message_test(
+  "GetCredentialStatus failure does not emit events", {
+    {
+      channel = "matter",
+      direction = "receive",
+      message = {
+        mock_device.id,
+        DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
+          mock_device, 10, -- endpoint_id
+          true, -- credential_exists
+          1, -- user_index
+          nil, -- creator_fabric_index
+          nil, -- last_modified_fabric_index
+          20, -- next_credential_index
+          nil, -- credential_data
+          im.InteractionResponse.Status.FAILURE
+        ),
+      },
+    }
   }
 )
 
@@ -312,7 +375,7 @@ test.register_coroutine_test(
 )
 
 test.register_coroutine_test(
-  "Requesting a user code should be handled", function()
+  "Requesting a set user code should be handled", function()
     test.socket.capability:__queue_receive(
       {
         mock_device.id,
@@ -321,14 +384,14 @@ test.register_coroutine_test(
     )
     local credential = {credential_type = types.DlCredentialType.PIN, credential_index = 1}
     test.socket.matter:__expect_send(
-      {mock_device.id, DoorLock.server.commands.GetCredentialStatus(mock_device, 1, credential)}
+      {mock_device.id, DoorLock.server.commands.GetCredentialStatus(mock_device, 10, credential)}
     )
     test.wait_for_events()
     test.socket.matter:__queue_receive(
       {
         mock_device.id,
         DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
-          mock_device, 1, -- endpoint
+          mock_device, 10, -- endpoint
           true, -- credential_exists
           1, -- user_index
           nil, -- creator_fabric_index
@@ -354,6 +417,144 @@ test.register_coroutine_test(
 )
 
 test.register_coroutine_test(
+  "Requesting an unset user code should be handled", function()
+    test.socket.capability:__queue_receive(
+      {
+        mock_device.id,
+        {capability = capabilities.lockCodes.ID, command = "requestCode", args = {1}},
+      }
+    )
+    local credential = {credential_type = types.DlCredentialType.PIN, credential_index = 1}
+    test.socket.matter:__expect_send(
+      {mock_device.id, DoorLock.server.commands.GetCredentialStatus(mock_device, 10, credential)}
+    )
+    test.wait_for_events()
+    test.socket.matter:__queue_receive(
+      {
+        mock_device.id,
+        DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
+          mock_device, 10, -- endpoint
+          false, -- credential_exists
+          1, -- user_index
+          nil, -- creator_fabric_index
+          nil, -- last_modified_fabric_index
+          20 -- next_credential_index
+        ),
+      }
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes
+          .codeChanged("1 unset", {data = {codeName = "Code 1"}, state_change = true})
+      )
+    )
+  end
+)
+
+test.register_coroutine_test(
+  "ScanCodes discovers an unset code", function()
+    --Populate some existing codes
+    test.socket.capability:__queue_receive(
+      {
+        mock_device.id,
+        {capability = capabilities.lockCodes.ID, command = "reloadAllCodes", args = {}},
+      }
+    )
+    expect_reload_all_codes_messages(mock_device)
+    test.wait_for_events()
+    -- Scan codes again, with first code being discovered as unset
+    test.socket.capability:__queue_receive(
+      {
+        mock_device.id,
+        {capability = capabilities.lockCodes.ID, command = "reloadAllCodes", args = {}},
+      }
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes.lockCodes(
+          json.encode({}), {visibility = {displayed = false}}
+        )
+      )
+    )
+    test.timer.__create_and_queue_test_time_advance_timer(5, "oneshot")
+    test.mock_time.advance_time(5)
+    local credential = types.DlCredential({credential_type = types.DlCredentialType.PIN, credential_index = 1})
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes.scanCodes("Scanning")
+      )
+    )
+    test.socket.matter:__expect_send(
+      {mock_device.id, DoorLock.server.commands.GetCredentialStatus(mock_device, 10, credential)}
+    )
+    test.wait_for_events()
+    test.socket.matter:__queue_receive(
+      {
+        mock_device.id,
+        DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
+          mock_device, 10, -- endpoint
+          false, --credential exists
+          1,  --user_index
+          nil, --creator fabric index
+          nil, --last modified fabric index
+          2    --next credential index
+        ),
+      }
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes
+          .codeChanged("1 unset", {data = {codeName = "Code 1"}, state_change = true})
+      )
+    )
+    credential = types.DlCredential({credential_type = types.DlCredentialType.PIN, credential_index = 2})
+    test.socket.matter:__expect_send(
+      {mock_device.id, DoorLock.server.commands.GetCredentialStatus(mock_device, 10, credential)}
+    )
+    test.wait_for_events()
+    test.socket.matter:__queue_receive(
+      {
+        mock_device.id,
+        DoorLock.client.commands.GetCredentialStatusResponse:build_test_command_response(
+          mock_device, 10, -- endpoint
+          true, --credential exists
+          2,  --user_index
+          nil, --creator fabric index
+          nil, --last modified fabric index
+          nil  --next credential index
+        ),
+      }
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes
+          .codeChanged("2 set", {data = {codeName = "Code 2"}, state_change = true})
+      )
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes.lockCodes(
+          json.encode({["2"] = "Code 2"}), {visibility = {displayed = false}}
+        )
+      )
+    )
+    -- Scan codes completes
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes.scanCodes("Complete", {visibility = {displayed = false}})
+      )
+    )
+    test.socket.capability:__expect_send(
+      mock_device:generate_test_message(
+        "main", capabilities.lockCodes.lockCodes(
+          json.encode({["2"] = "Code 2"}), {visibility = {displayed = false}}
+        )
+      )
+    )
+  end
+)
+
+test.register_coroutine_test(
   "Deleting a user code should be handled", function()
     init_code_slot(1, "initialName", mock_device)
     test.socket.capability:__expect_send(
@@ -371,7 +572,7 @@ test.register_coroutine_test(
       mock_device.id,
       DoorLock.server.commands.ClearCredential(
         mock_device,
-        1,
+        10,
         {credential_type = types.DlCredentialType.PIN, credential_index = 1}
       )
     })
@@ -380,7 +581,7 @@ test.register_coroutine_test(
     test.socket.matter:__queue_receive(
       {
         mock_device.id,
-        DoorLock.server.commands.ClearCredential:build_test_command_response(mock_device, 1),
+        DoorLock.server.commands.ClearCredential:build_test_command_response(mock_device, 10),
       }
     )
 
@@ -416,7 +617,7 @@ test.register_coroutine_test(
       {
         mock_device.id,
         DoorLock.server.commands.SetCredential(
-          mock_device, 1, -- endpoint
+          mock_device, 10, -- endpoint
           DoorLock.types.DlDataOperationType.ADD, -- operation_type
           DoorLock.types.DlCredential(
             {credential_type = DoorLock.types.DlCredentialType.PIN, credential_index = code_slot}
@@ -434,7 +635,7 @@ test.register_coroutine_test(
       {
         mock_device.id,
         DoorLock.client.commands.SetCredentialResponse:build_test_command_response(
-          mock_device, 1, -- endpoint_id
+          mock_device, 10, -- endpoint_id
           DoorLock.types.DlStatus.SUCCESS, -- status
           1, -- user_index
           2 -- next_credential_index
@@ -527,7 +728,7 @@ test.register_message_test(
       message = {
         mock_device.id,
         DoorLock.server.events.LockUserChange:build_test_event_report(
-          mock_device, 1, -- endpoint
+          mock_device, 10, -- endpoint
           {
             lock_data_type = types.DlLockDataType.PIN,
             data_operation_type = types.DlDataOperationType.ADD,
@@ -572,7 +773,7 @@ test.register_coroutine_test(
       {
         mock_device.id,
         DoorLock.server.events.LockUserChange:build_test_event_report(
-          mock_device, 1, -- endpoint
+          mock_device, 10, -- endpoint
           {
             lock_data_type = types.DlLockDataType.PIN,
             data_operation_type = types.DlDataOperationType.CLEAR,
@@ -632,7 +833,7 @@ test.register_coroutine_test(
       {
         mock_device.id,
         DoorLock.server.events.LockUserChange:build_test_event_report(
-          mock_device, 1, -- endpoint
+          mock_device, 10, -- endpoint
           {
             lock_data_type = types.DlLockDataType.USER_INDEX,
             data_operation_type = types.DlDataOperationType.CLEAR,

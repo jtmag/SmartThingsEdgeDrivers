@@ -72,7 +72,7 @@ test.register_coroutine_test(
     test.socket.device_lifecycle:__queue_receive({ mock_device.id, "added" })
     test.socket.capability:__expect_send(
       mock_device:generate_test_message("main",
-        capabilities.windowShade.supportedWindowShadeCommands({ "open", "close", "pause" }))
+        capabilities.windowShade.supportedWindowShadeCommands({ "open", "close", "pause" }, {visibility = {displayed = false}}))
     )
     test.socket.capability:__expect_send(
       mock_device:generate_test_message("main", capabilities.windowShadeLevel.shadeLevel(0))
@@ -84,7 +84,7 @@ test.register_coroutine_test(
       mock_device:generate_test_message("main", initializedStateWithGuide.initializedStateWithGuide.notInitialized())
     )
     test.socket.capability:__expect_send(
-      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle())
+      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle({visibility = { displayed = false }}))
     )
 
     test.socket.zigbee:__expect_send({ mock_device.id,
@@ -239,7 +239,7 @@ test.register_coroutine_test(
       }
     )
     test.socket.capability:__expect_send(
-      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle({state_change = true}))
+      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle({state_change = true, visibility = { displayed = false }}))
     )
   end
 )
@@ -256,7 +256,7 @@ test.register_coroutine_test(
       }
     )
     test.socket.capability:__expect_send(
-      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle({state_change = true}))
+      mock_device:generate_test_message("main", shadeRotateState.rotateState.idle({state_change = true, visibility = { displayed = false }}))
     )
   end
 )
