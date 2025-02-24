@@ -141,10 +141,11 @@ end
 
 function CapabilityHandlers.handle_audio_notification(driver, device, cmd)
   local ip = device:get_field("ip")
+  local default_level = device:get_latest_state("main", caps.audioVolume.ID, caps.audioVolume.volume.NAME, 30)
   log.info(string.format("[%s](%s) BoseCmd: audio notification with uri %s at level %d", bose_utils.get_serial_number(device),
-                         device.label, cmd.args.uri, cmd.args.level))
-  local err = command.play_streaming_uri(ip, cmd.args.uri, cmd.args.level)
-  if err then log.error_with({hub_logs=true}, string.format("failed to handle set volume: %s", err)) end
+                         device.label, cmd.args.uri, cmd.args.level or default_level))
+  local err = command.play_streaming_uri(ip, cmd.args.uri, cmd.args.level or default_level)
+  if err then log.error_with({hub_logs=true}, string.format("failed to handle audio notification: %s", err)) end
 end
 
 

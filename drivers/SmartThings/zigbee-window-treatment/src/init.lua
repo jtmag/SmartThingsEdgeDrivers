@@ -25,9 +25,20 @@ local zigbee_window_treatment_driver_template = {
     capabilities.windowShade,
     capabilities.windowShadePreset,
     capabilities.windowShadeLevel,
+    capabilities.powerSource,
     capabilities.battery
   },
-  sub_drivers = { require("vimar"), require("aqara"), require("feibit"), require("somfy"), require("IKEA"), require("rooms-beautiful"), require("axis"), require("yoolax") },
+  sub_drivers = {
+    require("vimar"),
+    require("aqara"),
+    require("feibit"),
+    require("somfy"),
+    require("invert-lift-percentage"),
+    require("rooms-beautiful"),
+    require("axis"),
+    require("yoolax"),
+    require("hanssem"),
+    require("screen-innovations")},
   lifecycle_handlers = {
     added = added_handler
   }

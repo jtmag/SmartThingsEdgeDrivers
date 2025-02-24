@@ -96,13 +96,15 @@ local function added_handler(self, device)
   end
   device:send(DoorLock:OperationGet({}))
   device:send(Battery:Get({}))
-  -- if (device:supports_capability(capabilities.tamperAlert)) then
-  --   device:emit_event(capabilities.tamperAlert.tamper.clear())
-  -- end
+  if (device:supports_capability(capabilities.tamperAlert)) then
+    device:emit_event(capabilities.tamperAlert.tamper.clear())
+  end
 end
 
 local init_handler = function(driver, device, event)
   populate_state_from_data(device)
+  -- temp fix before this can be changed from being persisted in memory
+  device:set_field(constants.CODE_STATE, nil, { persist = true })
 end
 
 local do_refresh = function(self, device)
@@ -184,7 +186,8 @@ local driver_template = {
     require("zwave-alarm-v1-lock"),
     require("schlage-lock"),
     require("samsung-lock"),
-    require("keywe-lock")
+    require("keywe-lock"),
+    require("apiv6_bugfix"),
   }
 }
 
