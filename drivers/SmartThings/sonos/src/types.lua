@@ -1,5 +1,7 @@
 local handlers = require "api.event_handlers"
 local log = require "log"
+local st_utils = require "st.utils"
+
 local PlayerFields = require "fields".SonosPlayerFields
 
 --- @module 'sonos.types'
@@ -7,16 +9,16 @@ local Types = {}
 
 --- @enum SonosCapabilities
 Types.SonosCapabilities = {
-  PLAYBACK = "PLAYBACK", --- The player can produce audio. You can target it for playback.
-  CLOUD = "CLOUD", --- The player can send commands and receive events over the internet.
-  HT_PLAYBACK = "HT_PLAYBACK", --- The player is a home theater source. It can reproduce the audio from a home theater system, typically delivered by S/PDIF or HDMI.
-  HT_POWER_STATE = "HT_POWER_STATE", --- The player can control the home theater power state. For example, it can switch a connected TV on or off.
-  AIRPLAY = "AIRPLAY", --- The player can host AirPlay streams. This capability is present when the device is advertising AirPlay support.
-  LINE_IN = "LINE_IN", --- The player has an analog line-in.
-  AUDIO_CLIP = "AUDIO_CLIP", ---  The device is capable of playing audio clip notifications.
-  VOICE = "VOICE", --- The device supports the voice namespace (not yet implemented by Sonos).
+  PLAYBACK = "PLAYBACK",                   --- The player can produce audio. You can target it for playback.
+  CLOUD = "CLOUD",                         --- The player can send commands and receive events over the internet.
+  HT_PLAYBACK = "HT_PLAYBACK",             --- The player is a home theater source. It can reproduce the audio from a home theater system, typically delivered by S/PDIF or HDMI.
+  HT_POWER_STATE = "HT_POWER_STATE",       --- The player can control the home theater power state. For example, it can switch a connected TV on or off.
+  AIRPLAY = "AIRPLAY",                     --- The player can host AirPlay streams. This capability is present when the device is advertising AirPlay support.
+  LINE_IN = "LINE_IN",                     --- The player has an analog line-in.
+  AUDIO_CLIP = "AUDIO_CLIP",               ---  The device is capable of playing audio clip notifications.
+  VOICE = "VOICE",                         --- The device supports the voice namespace (not yet implemented by Sonos).
   SPEAKER_DETECTION = "SPEAKER_DETECTION", --- The component device is capable of detecting connected speaker drivers.
-  FIXED_VOLUME = "FIXED_VOLUME" --- The device supports fixed volume.
+  FIXED_VOLUME = "FIXED_VOLUME"            --- The device supports fixed volume.
 }
 
 --- @alias PlayerId string
@@ -136,10 +138,12 @@ function SonosState.new()
   }
 
   ret.mark_player_as_joined = function(self, player_id)
+    log.debug(string.format("Marking Player ID %s as joined", player_id))
     private.joined_players[player_id] = true
   end
 
   ret.mark_player_as_removed = function(self, player_id)
+    log.debug(string.format("Marking Player ID %s as removed", player_id))
     private.joined_players[player_id] = false
   end
 
@@ -164,6 +168,16 @@ function SonosState.new()
   --- @param groups_event SonosGroupsResponseBody
   --- @param device SonosDevice|nil
   ret.update_household_info = function(self, id, groups_event, device)
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        {name = (device or { label = "<no device>" }).label, event = groups_event },
+        string.format("Update household info for household %s", id),
+        true
+      )
+    )
+    if device and device.label then
+      log.debug(string.format("Household update triggered by device %s to update capabilities", device.label))
+    end
     local household = private.households[id] or {}
     local groups, players = groups_event.groups, groups_event.players
 
@@ -198,6 +212,7 @@ function SonosState.new()
 
     -- emit group info update [groupId, groupRole, groupPrimaryDeviceId]
     if device ~= nil then
+      log.debug(string.format("Emitting group info update for Device %s", device.label))
       local device_player_id = device:get_field(PlayerFields.PLAYER_ID)
       local group_id = self:get_group_for_player(id, device_player_id)
       local coordinator_id = self:get_coordinator_for_player(id, device_player_id)
@@ -213,31 +228,67 @@ function SonosState.new()
         role = "auxilary"
       end
 
-      handlers.handle_group_update(device, {role, coordinator_id, group_id})
+      local group_update_payload = { role, coordinator_id, group_id }
+      if type(coordinator_id) == "string" and type(group_id) == "string" then
+        handlers.handle_group_update(device, group_update_payload)
+      else
+        log.warn(
+        st_utils.stringify_table(
+            { household = household, group_update_payload = group_update_payload },
+            "Household update with invalid data",
+            false
+          )
+        )
+      end
     end
   end
 
   --- @param self SonosState
   --- @param household_id HouseholdId
   --- @param player_id PlayerId
-  --- @return GroupId
+  --- @return GroupId?,string?
   ret.get_group_for_player = function(self, household_id, player_id)
-    return private.households[household_id].player_to_group_map[player_id]
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { household_id = household_id, player_id = player_id }, "Get Group For Player", true
+      )
+    )
+    local household = private.households[household_id]
+    if household == nil then
+      log.error(st_utils.stringify_table({ household = household }, "Get group for invalid household", false))
+      return nil, st_utils.stringify_table({ household = household }, "Get group for invalid household", false)
+    end
+    return household.player_to_group_map[player_id]
   end
 
   --- @param self SonosState
   --- @param household_id HouseholdId
   --- @param group_id GroupId
-  --- @return PlayerId
+  --- @return PlayerId?,string?
   ret.get_coordinator_for_group = function(self, household_id, group_id)
-    return private.households[household_id].group_to_coordinator_map[group_id]
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { household_id = household_id, group_id = group_id }, "Get Coordinator For Group", true
+      )
+    )
+    local household = private.households[household_id]
+    if household == nil then
+      log.error(st_utils.stringify_table({ household = household }, "Get coordinator for invalid household", false))
+      return nil, st_utils.stringify_table({ household = household }, "Get coordinator for invalid household", false)
+    end
+    return household.group_to_coordinator_map[group_id]
   end
 
   --- @param self SonosState
   --- @param household_id HouseholdId
   --- @param player_id PlayerId
-  --- @return PlayerId
+  --- @return PlayerId?,string?
   ret.get_coordinator_for_player = function(self, household_id, player_id)
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { household_id = household_id, player_id = player_id }, "Get Coordinator For Player", true
+      )
+    )
     return self:get_coordinator_for_group(
       household_id,
       self:get_group_for_player(household_id, player_id)
@@ -251,7 +302,14 @@ function SonosState.new()
   --- @return nil|string error nil on success
   ret.get_player_for_device = function(self, device)
     local household_id, player_id = device:get_field(PlayerFields.HOUSEHOULD_ID),
-        device:get_field(PlayerFields.PLAYER_ID)
+      device:get_field(PlayerFields.PLAYER_ID)
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { name = (device or {label = "<no device>"}).label, household_id = household_id, player_id = player_id },
+        "Get Player For Device",
+        true
+      )
+    )
 
     if not (device:get_field(PlayerFields._IS_INIT) or household_id or player_id) then
       return nil, nil,
@@ -268,7 +326,13 @@ function SonosState.new()
   --- @return nil|string error nil on success
   ret.get_coordinator_for_device = function(self, device)
     local household_id, player_id, err = self:get_player_for_device(device)
-
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { name = (device or {label = "<no device>"}).label, household_id = household_id, player_id = player_id },
+        "Get Coordinator For Device",
+        true
+      )
+    )
     if err then
       return nil, nil, err
     end
@@ -289,7 +353,13 @@ function SonosState.new()
   --- @return nil|string error nil on success
   ret.get_group_for_device = function(self, device)
     local household_id, player_id, err = self:get_player_for_device(device)
-
+    log.debug_with({ hub_logs = true },
+      st_utils.stringify_table(
+        { name = (device or {label = "<no device>"}).label, household_id = household_id, player_id = player_id },
+        "Get Group For Device",
+        true
+      )
+    )
     if err then
       return nil, nil, err
     end

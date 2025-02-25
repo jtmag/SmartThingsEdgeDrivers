@@ -41,7 +41,8 @@ local ZWAVE_DUAL_SWITCH_FINGERPRINTS = {
 local function can_handle_zwave_dual_switch(opts, driver, device, ...)
   for _, fingerprint in ipairs(ZWAVE_DUAL_SWITCH_FINGERPRINTS) do
     if device:id_match(fingerprint.mfr, fingerprint.prod, fingerprint.model) then
-      return true
+      local subdriver = require("zwave-dual-switch")
+      return true, subdriver
     end
   end
   return false
@@ -116,6 +117,20 @@ local function do_refresh(driver, device, command)
   end
 end
 
+-- Do not use native handlers due to unique component to endpoint mapping
+local function switch_on_handler(driver, device, cmd)
+  switch_defaults.capability_handlers[capabilities.switch.commands.on](driver, device, cmd, false)
+end
+
+local function switch_off_handler(driver, device, cmd)
+  switch_defaults.capability_handlers[capabilities.switch.commands.off](driver, device, cmd, false)
+end
+
+local function set_level_handler(driver, device, cmd)
+  local defaults = require "st.zwave.defaults.switchLevel"
+  defaults.capability_handlers[capabilities.switchLevel.commands.setLevel](driver, device, cmd, false)
+end
+
 local function switch_report(driver, device, cmd)
   switch_defaults.zwave_handlers[cc.SWITCH_BINARY][SwitchBinary.REPORT](driver, device, cmd)
 
@@ -138,7 +153,14 @@ local zwave_dual_switch = {
   capability_handlers = {
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = do_refresh
-    }
+    },
+    [capabilities.switch.ID] = {
+      [capabilities.switch.commands.on.NAME] = switch_on_handler,
+      [capabilities.switch.commands.off.NAME] = switch_off_handler,
+    },
+    [capabilities.switchLevel.ID] = {
+      [capabilities.switchLevel.commands.setLevel.NAME] = set_level_handler,
+    },
   },
   lifecycle_handlers = {
     added = device_added,

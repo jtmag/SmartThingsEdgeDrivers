@@ -62,6 +62,14 @@ def compare_preferences(prof1, prof2):
     else:
         return False
 
+def compare_metadata(prof1, prof2):
+    if "metadata" in prof1 and "metadata" in prof2:
+        return prof1["metadata"] == prof2["metadata"]
+    elif "metadata" not in prof1 and "metadata" not in prof2:
+        return True
+    else:
+        return False
+
 def compare_components(prof1, prof2):
     if len(prof1["components"]) == len(prof2["components"]):
         for y, new_component in enumerate(prof1["components"]):
@@ -69,6 +77,10 @@ def compare_components(prof1, prof2):
 
             # compare categores. Use get() in case the category does not exist like in "thing" profiles
             if new_component.get("categories") != current_component.get("categories"):
+                return False
+
+            # compare labels
+            if new_component.get("label") != current_component.get("label"):
                 return False
 
             # check that there are the same number of capabilities and that the top capability matches
@@ -119,6 +131,7 @@ with open(str(Path.home()) + '/files.csv', 'r') as csvfile:
                             - preferences must be the same
                         '''
                         if(compare_preferences(new_profile_map, current_profile_map) == True and
+                           compare_metadata(new_profile_map, current_profile_map) == True and
                            compare_components(new_profile_map, current_profile_map) == True):
                             print("%s and %s are duplicates!\n" % (new_profile, current_profile))
                             duplicate_pairs.append((new_profile, current_profile))

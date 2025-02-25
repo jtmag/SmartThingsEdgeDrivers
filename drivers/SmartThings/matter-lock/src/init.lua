@@ -22,7 +22,18 @@ local capabilities = require "st.capabilities"
 local im = require "st.matter.interaction_model"
 local lock_utils = require "lock_utils"
 
+local PROFILE_BASE_NAME = "__profile_base_name"
+
 local INITIAL_COTA_INDEX = 1
+
+-- add this definition for locks to work on older lua libs
+local UNLATCHED_STATE = 0x3
+
+local subscribed_attributes = {
+  [capabilities.lock.ID] = {DoorLock.attributes.LockState},
+  [capabilities.battery.ID] = {PowerSource.attributes.BatPercentRemaining},
+  [capabilities.batteryLevel.ID] = {PowerSource.attributes.BatChargeLevel},
+}
 
 --- If a device needs a cota credential this function attempts to set the credential
 --- at the index provided. The set_credential_response_handler handles all failures
@@ -33,8 +44,8 @@ local function set_cota_credential(device, credential_index)
   if cota_cred == nil then
     -- Shouldn't happen but defensive to try to figure out if we need the cota cred and set it.
     device:send(DoorLock.attributes.RequirePINforRemoteOperation:read(device, #eps > 0 and eps[1] or 1))
-    device.thread:call_with_delay(2, function(t) set_cota_credential(device, credential_index) end)
-  elseif not cota_cred then
+    return
+  elseif cota_cred == false then
     device.log.debug("Device does not require PIN for remote operation. Not setting COTA credential")
     return
   end
@@ -75,9 +86,10 @@ local function lock_state_handler(driver, device, ib, response)
   local LockState = DoorLock.attributes.LockState
   local attr = capabilities.lock.lock
   local LOCK_STATE = {
-    [LockState.NOT_FULLY_LOCKED] = attr.unknown(),
+    [LockState.NOT_FULLY_LOCKED] = attr.not_fully_locked(),
     [LockState.LOCKED] = attr.locked(),
     [LockState.UNLOCKED] = attr.unlocked(),
+    [UNLATCHED_STATE] = attr.unlocked(), -- Fully unlocked with latch pulled
   }
 
   if ib.data.value ~= nil then
@@ -90,6 +102,42 @@ end
 local function handle_battery_percent_remaining(driver, device, ib, response)
   if ib.data.value ~= nil then
     device:emit_event(capabilities.battery.battery(math.floor(ib.data.value / 2.0 + 0.5)))
+  end
+end
+
+local function handle_battery_charge_level(driver, device, ib, response)
+  if ib.data.value == clusters.PowerSource.types.BatChargeLevelEnum.OK then
+    device:emit_event(capabilities.batteryLevel.battery.normal())
+  elseif ib.data.value == clusters.PowerSource.types.BatChargeLevelEnum.WARNING then
+    device:emit_event(capabilities.batteryLevel.battery.warning())
+  elseif ib.data.value == clusters.PowerSource.types.BatChargeLevelEnum.CRITICAL then
+    device:emit_event(capabilities.batteryLevel.battery.critical())
+  end
+end
+
+local function handle_power_source_attribute_list(driver, device, ib, response)
+  local support_battery_percentage = false
+  local support_battery_level = false
+  for _, attr in ipairs(ib.data.elements) do
+    -- Re-profile the device if BatPercentRemaining (Attribute ID 0x0C) or
+    -- BatChargeLevel (Attribute ID 0x0E) is present.
+    if attr.value == 0x0C then
+      support_battery_percentage = true
+    elseif attr.value == 0x0E then
+      support_battery_level = true
+    end
+  end
+  local profile_name = device:get_field(PROFILE_BASE_NAME)
+  if profile_name ~= nil then
+    if not support_battery_percentage then
+      if support_battery_level then
+        profile_name = profile_name .. "-batteryLevel"
+      else
+        profile_name = profile_name .. "-nobattery"
+      end
+    end
+    device.log.info(string.format("Updating device profile to %s.", profile_name))
+    device:try_update_metadata({profile = profile_name})
   end
 end
 
@@ -106,8 +154,8 @@ local function num_pin_users_handler(driver, device, ib, response)
   device:emit_event(capabilities.lockCodes.maxCodes(ib.data.value, {visibility = {displayed = false}}))
 end
 
-local function require_remote_pin_handler(driver, device, ib, response)
-  if ib.data.value then
+local function apply_cota_credentials_if_absent(device)
+  if not device:get_field(lock_utils.COTA_CRED) then
     --Process after all other info blocks have been dispatched to ensure MaxPINCodeLength has been processed
     device.thread:call_with_delay(0, function(t)
       generate_cota_cred_for_device(device)
@@ -117,6 +165,12 @@ local function require_remote_pin_handler(driver, device, ib, response)
         set_cota_credential(device, INITIAL_COTA_INDEX)
       end)
     end)
+  end
+end
+
+local function require_remote_pin_handler(driver, device, ib, response)
+  if ib.data.value then
+    apply_cota_credentials_if_absent(device)
   else
     device:set_field(lock_utils.COTA_CRED, false, {persist = true})
   end
@@ -124,7 +178,7 @@ end
 
 local function clear_credential_response_handler(driver, device, ib, response)
   local deleted_code_slot = device:get_field(lock_utils.DELETING_CODE)
-  if deleted_code_slot == nil then
+  if deleted_code_slot == nil and ib.status == im.InteractionResponse.Status.SUCCESS then
     device.log.debug("Cleared space in lock credential db for COTA credential")
     return
   end
@@ -177,7 +231,18 @@ local function set_credential_response_handler(driver, device, ib, response)
     if device:get_field(lock_utils.NONFUNCTIONAL) and cota_cred_index == credential_index then
       device.log.info("Successfully set COTA credential after being non-functional")
       device:set_field(lock_utils.NONFUNCTIONAL, false, {persist = true})
-      device:try_update_metadata({profile = "base-lock", provisioning_state = "PROVISIONED"})
+      local profile_name = "base-lock"
+      device:set_field(PROFILE_BASE_NAME, profile_name, {persist = true})
+      local battery_feature_eps = device:get_endpoints(clusters.PowerSource.ID, {feature_bitmap = clusters.PowerSource.types.PowerSourceFeature.BATTERY})
+      if #battery_feature_eps == 0 then
+        profile_name = profile_name .. "-nobattery"
+        device.log.info(string.format("Updating device profile to %s.", profile_name))
+        device:try_update_metadata({profile = profile_name, provisioning_state = "PROVISIONED"})
+      else
+        local req = im.InteractionRequest(im.InteractionRequest.RequestType.READ, {})
+        req:merge(clusters.PowerSource.attributes.AttributeList:read())
+        device:send(req)
+      end
     end
   elseif device:get_field(lock_utils.COTA_CRED) and credential_index == device:get_field(lock_utils.COTA_CRED_INDEX) then
     -- Handle failure to set a COTA credential
@@ -190,6 +255,7 @@ local function set_credential_response_handler(driver, device, ib, response)
       --There are no credential indices available on the device
       device.log.error("Device requires COTA credential, but has no credential indexes available!")
       device.log.error("Lock and Unlock commands will no longer work!!")
+      device:set_field(PROFILE_BASE_NAME, "nonfunctional-lock", {persist = true})
       device:try_update_metadata({profile = "nonfunctional-lock", provisioning_state = "NONFUNCTIONAL"})
       device:set_field(lock_utils.NONFUNCTIONAL, true, {persist = true})
     elseif status == DoorLock.types.DlStatus.OCCUPIED and elements.next_credential_index.value == nil then
@@ -364,30 +430,33 @@ local function lock_user_change_event_handler(driver, device, ib, response)
 end
 
 local function handle_refresh(driver, device, command)
-  local req = DoorLock.attributes.LockState:read(device, device.MATTER_DEFAULT_ENDPOINT)
-  req:merge(PowerSource.attributes.BatPercentRemaining:read(device, device.MATTER_DEFAULT_ENDPOINT))
+  -- Note: no endpoint specified indicates a wildcard endpoint
+  local req = DoorLock.attributes.LockState:read(device)
+  req:merge(PowerSource.attributes.BatPercentRemaining:read(device))
   device:send(req)
 end
 
 local function handle_lock(driver, device, command)
+  local ep = device:component_to_endpoint(command.component)
   local cota_cred = device:get_field(lock_utils.COTA_CRED)
   if cota_cred then
     device:send(
-      DoorLock.server.commands.LockDoor(device, device.MATTER_DEFAULT_ENDPOINT, cota_cred)
+      DoorLock.server.commands.LockDoor(device, ep, cota_cred)
     )
   else
-    device:send(DoorLock.server.commands.LockDoor(device, device.MATTER_DEFAULT_ENDPOINT))
+    device:send(DoorLock.server.commands.LockDoor(device, ep))
   end
 end
 
 local function handle_unlock(driver, device, command)
+  local ep = device:component_to_endpoint(command.component)
   local cota_cred = device:get_field(lock_utils.COTA_CRED)
   if cota_cred then
     device:send(
-      DoorLock.server.commands.UnlockDoor(device, device.MATTER_DEFAULT_ENDPOINT, cota_cred)
+      DoorLock.server.commands.UnlockDoor(device, ep, cota_cred)
     )
   else
-    device:send(DoorLock.server.commands.UnlockDoor(device, device.MATTER_DEFAULT_ENDPOINT))
+    device:send(DoorLock.server.commands.UnlockDoor(device, ep))
   end
 end
 
@@ -403,19 +472,22 @@ end
 
 local function handle_reload_all_codes(driver, device, command)
   if (device:get_field(lock_utils.CHECKING_CREDENTIAL) == nil) then
+    lock_utils.lock_codes_event(device, {})
     device:set_field(lock_utils.CHECKING_CREDENTIAL, 1)
   else
     device.log.info(string.format("Delaying scanning since currently checking credential %d", device:get_field(lock_utils.CHECKING_CREDENTIAL)))
     device.thread:call_with_delay(2, function(t) handle_reload_all_codes(driver, device, command) end)
     return
   end
-  device:emit_event(capabilities.lockCodes.scanCodes("Scanning"))
-  device:send(
-    clusters.DoorLock.server.commands.GetCredentialStatus(
-      device, device:component_to_endpoint(command.component),
-      {credential_type = DoorLock.types.DlCredentialType.PIN, credential_index = device:get_field(lock_utils.CHECKING_CREDENTIAL)}
+  device.thread:call_with_delay(5, function(t)
+    device:emit_event(capabilities.lockCodes.scanCodes("Scanning"))
+    device:send(
+      clusters.DoorLock.server.commands.GetCredentialStatus(
+        device, device:component_to_endpoint(command.component),
+        {credential_type = DoorLock.types.DlCredentialType.PIN, credential_index = device:get_field(lock_utils.CHECKING_CREDENTIAL)}
+      )
     )
-  )
+  end)
 end
 
 local function handle_request_code(driver, device, command)
@@ -476,14 +548,93 @@ local function handle_name_slot(driver, device, command)
   end
 end
 
-local function device_init(driver, device) device:subscribe() end
+local function find_default_endpoint(device, cluster)
+  local res = device.MATTER_DEFAULT_ENDPOINT
+  local eps = device:get_endpoints(cluster)
+  table.sort(eps)
+  for _, v in ipairs(eps) do
+    if v ~= 0 then --0 is the matter RootNode endpoint
+      return v
+    end
+  end
+  device.log.warn(string.format("Did not find default endpoint, will use endpoint %d instead", device.MATTER_DEFAULT_ENDPOINT))
+  return res
+end
+
+local function component_to_endpoint(device, component_name)
+  return find_default_endpoint(device, clusters.DoorLock.ID)
+end
+
+local function info_changed(driver, device, event, args)
+  if device.profile.id ~= args.old_st_store.profile.id then
+    device:subscribe()
+  end
+end
+
+local function do_configure(driver, device)
+  -- check if the device is NOT currently profiled as base-lock
+  -- by ANDing a query for every capability in the base-lock profiles.
+  -- If it does not use base-lock, it is WWST and does not need re-profiling.
+  if not (device:supports_capability(capabilities.lock) and
+    device:supports_capability(capabilities.lockCodes) and
+    device:supports_capability(capabilities.tamperAlert) and
+    device:supports_capability(capabilities.battery)) then
+    return
+  end
+
+  -- if not fingerprinted, dynamically configure base-lock profile
+  local profile_name = "base-lock"
+  device:set_field(PROFILE_BASE_NAME, profile_name, {persist = true})
+  local battery_feature_eps = device:get_endpoints(clusters.PowerSource.ID, {feature_bitmap = clusters.PowerSource.types.PowerSourceFeature.BATTERY})
+  if #battery_feature_eps == 0 then
+    profile_name = profile_name .. "-nobattery"
+    device.log.info(string.format("Updating device profile to %s.", profile_name))
+    device:try_update_metadata({profile = profile_name})
+  else
+    local req = im.InteractionRequest(im.InteractionRequest.RequestType.READ, {})
+    req:merge(clusters.PowerSource.attributes.AttributeList:read())
+    device:send(req)
+  end
+end
+
+local function device_init(driver, device)
+  device:set_component_to_endpoint_fn(component_to_endpoint)
+  device:subscribe()
+
+  -- check if we have a missing COTA credential. Only run this if it has not been run before (i.e. in device added),
+  -- because there is a delay built into the COTA process and we do not want to start two COTA generations at the same time
+  -- in the event this was triggered on add.
+  if not device:get_field(lock_utils.COTA_READ_INITIALIZED) or not device:get_field(lock_utils.COTA_CRED) then
+    local eps = device:get_endpoints(DoorLock.ID, {feature_bitmap = DoorLock.types.DoorLockFeature.CREDENTIALSOTA | DoorLock.types.DoorLockFeature.PIN_CREDENTIALS})
+    if #eps == 0 then
+      device.log.debug("Device will not require PIN for remote operation")
+      device:set_field(lock_utils.COTA_CRED, false, {persist = true})
+    else
+      device:send(DoorLock.attributes.RequirePINforRemoteOperation:read(device, eps[1]))
+      device:set_field(lock_utils.COTA_READ_INITIALIZED, true, {persist = true})
+    end
+  end
+end
 
 local function device_added(driver, device)
+  --Note: May want to write OperatingMode to NORMAL, to attempt to ensure remote operation works
+  --Note: May want to write RequirePINForRemoteOperation, to avoid cota cases if possible.
   device:emit_event(capabilities.tamperAlert.tamper.clear())
   local eps = device:get_endpoints(DoorLock.ID, {feature_bitmap = DoorLock.types.DoorLockFeature.PIN_CREDENTIALS})
   if #eps == 0 then
-    device.log.debug("Device does not support lockCodes")
-    device:try_update_metadata({profile = "lock-without-codes"})
+    if device:supports_capability_by_id(capabilities.tamperAlert.ID) then
+      device.log.debug("Device does not support lockCodes. Switching profile.")
+      local profile_name = "lock-without-codes"
+      device:set_field(PROFILE_BASE_NAME, profile_name, {persist = true})
+      local battery_feature_eps = device:get_endpoints(clusters.PowerSource.ID, {feature_bitmap = clusters.PowerSource.types.PowerSourceFeature.BATTERY})
+      if #battery_feature_eps == 0 then
+        profile_name = profile_name .. "-nobattery"
+      end
+      device.log.info(string.format("Updating device profile to %s.", profile_name))
+      device:try_update_metadata({profile = profile_name})
+    else
+      device.log.debug("Device supports neither lock codes nor tamper. Unable to switch profile.")
+    end
   else
     local req = im.InteractionRequest(im.InteractionRequest.RequestType.READ, {})
     req:merge(DoorLock.attributes.MaxPINCodeLength:read(device, eps[1]))
@@ -502,6 +653,7 @@ local function device_added(driver, device)
       device:set_field(lock_utils.COTA_CRED, false, {persist = true})
     else
       req:merge(DoorLock.attributes.RequirePINforRemoteOperation:read(device, eps[1]))
+      device:set_field(lock_utils.COTA_READ_INITIALIZED, true, {persist = true})
     end
     device:send(req)
   end
@@ -518,7 +670,9 @@ local matter_lock_driver = {
         [DoorLock.attributes.RequirePINforRemoteOperation.ID] = require_remote_pin_handler,
       },
       [PowerSource.ID] = {
+        [PowerSource.attributes.AttributeList.ID] = handle_power_source_attribute_list,
         [PowerSource.attributes.BatPercentRemaining.ID] = handle_battery_percent_remaining,
+        [PowerSource.attributes.BatChargeLevel.ID] = handle_battery_charge_level,
       },
     },
     event = {
@@ -536,12 +690,10 @@ local matter_lock_driver = {
       },
     },
   },
-  subscribed_attributes = {
-    [capabilities.lock.ID] = {DoorLock.attributes.LockState},
-    [capabilities.battery.ID] = {PowerSource.attributes.BatPercentRemaining},
-  },
+  subscribed_attributes = subscribed_attributes,
   subscribed_events = {
     [capabilities.tamperAlert.ID] = {DoorLock.events.DoorLockAlarm, DoorLock.events.LockOperation},
+    [capabilities.lockAlarm.ID] = {DoorLock.events.DoorLockAlarm},
     [capabilities.lockCodes.ID] = {DoorLock.events.LockUserChange},
   },
   capability_handlers = {
@@ -562,8 +714,18 @@ local matter_lock_driver = {
     capabilities.lock,
     capabilities.lockCodes,
     capabilities.tamperAlert,
+    capabilities.battery,
+    capabilities.batteryLevel,
   },
-  lifecycle_handlers = {init = device_init, added = device_added},
+  sub_drivers = {
+    require("new-matter-lock"),
+  },
+  lifecycle_handlers = {
+    init = device_init,
+    added = device_added,
+    doConfigure = do_configure,
+    infoChanged = info_changed,
+  },
 }
 
 -----------------------------------------------------------------------------------------------------------------------------

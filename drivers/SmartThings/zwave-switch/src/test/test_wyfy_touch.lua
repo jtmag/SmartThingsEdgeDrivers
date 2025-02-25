@@ -27,11 +27,6 @@ local WYFY_PRODUCT_ID = 0x5102
 local profile = t_utils.get_profile_definition("switch-binary.yml")
 
 local WYFY_multicomponent_endpoints = {
-  { -- ep 0
-    command_classes = {
-      { value = zw.SWITCH_BINARY }
-    }
-  },
   { -- ep 1
     command_classes = {
       { value = zw.SWITCH_BINARY }
@@ -256,6 +251,7 @@ test.register_coroutine_test(
       mock_parent_device.id,
       { capability = "switch", command = "off", component = "main", args = {} }
     })
+
     test.socket.zwave:__expect_send(
       zw_test_utils.zwave_test_build_send_command(
         mock_parent_device,

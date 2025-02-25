@@ -23,6 +23,10 @@ local Meter = (require "st.zwave.CommandClass.Meter")({version = 3})
 local Basic = (require "st.zwave.CommandClass.Basic")({ version = 1, strict = true })
 --- @type st.zwave.CommandClass.SwitchBinary
 local SwitchBinary = (require "st.zwave.CommandClass.SwitchBinary")({version = 2, strict = true })
+
+local energyMeterDefaults = require "st.zwave.defaults.energyMeter"
+local powerMeterDefaults = require "st.zwave.defaults.powerMeter"
+local switchDefaults = require "st.zwave.defaults.switch"
 local MULTI_METERING_SWITCH_CONFIGURATION_MAP = require "multi-metering-switch/multi_metering_switch_configurations"
 
 local PARENT_ENDPOINT = 1
@@ -37,13 +41,17 @@ local MULTI_METERING_SWITCH_FINGERPRINTS = {
   {mfr = 0x015F, prod = 0x3102, model = 0x0204}, -- WYFY Touch 4-button Switch
   {mfr = 0x015F, prod = 0x3111, model = 0x5102}, -- WYFY Touch 1-button Switch
   {mfr = 0x015F, prod = 0x3121, model = 0x5102}, -- WYFY Touch 2-button Switch
-  {mfr = 0x015F, prod = 0x3141, model = 0x5102} -- WYFY Touch 4-button Switch
+  {mfr = 0x015F, prod = 0x3141, model = 0x5102}, -- WYFY Touch 4-button Switch
+  {mfr = 0x0460, prod = 0x0002, model = 0x0081}, -- Shelly Wave 2PM
+  {mfr = 0x0460, prod = 0x0002, model = 0x008C}, -- Shelly Wave Pro 2
+  {mfr = 0x0460, prod = 0x0002, model = 0x008D}, -- Shelly Wave Pro 2PM
 }
 
 local function can_handle_multi_metering_switch(opts, driver, device, ...)
   for _, fingerprint in ipairs(MULTI_METERING_SWITCH_FINGERPRINTS) do
     if device:id_match(fingerprint.mfr, fingerprint.prod, fingerprint.model) then
-      return true
+      local subdriver = require("multi-metering-switch")
+      return true, subdriver
     end
   end
   return false
@@ -83,7 +91,7 @@ local function device_added(driver, device, event)
     local children_amount = MULTI_METERING_SWITCH_CONFIGURATION_MAP.get_child_amount(device)
     local device_profile = MULTI_METERING_SWITCH_CONFIGURATION_MAP.get_child_switch_device_profile(device)
     if children_amount == nil then
-      children_amount = utils.table_size(device.zwave_endpoints)-2
+      children_amount = utils.table_size(device.zwave_endpoints)-1
     end
     create_child_device(driver, device, children_amount, device_profile)
   end
@@ -114,11 +122,77 @@ local function do_refresh(driver, device, command) -- should be deleted when v46
   end
 end
 
+-- Do not use native handlers due to unique component to endpoint mapping
+local function switch_on_handler(driver, device, cmd)
+  switchDefaults.capability_handlers[capabilities.switch.commands.on](driver, device, cmd, false)
+end
+
+local function switch_off_handler(driver, device, cmd)
+  switchDefaults.capability_handlers[capabilities.switch.commands.off](driver, device, cmd, false)
+end
+
+local function set_level_handler(driver, device, cmd)
+  local defaults = require "st.zwave.defaults.switchLevel"
+  defaults.capability_handlers[capabilities.switchLevel.commands.setLevel](driver, device, cmd, false)
+end
+
+local function meter_report_handler(driver, device, cmd)
+  -- We got a meter report from the root node, so refresh all children
+  -- endpoint 0 should have its reports dropped
+  if (cmd.src_channel == 0) then
+    device:refresh()
+    for _, child in pairs(device:get_child_list()) do
+      child:refresh()
+    end
+  else
+    powerMeterDefaults.zwave_handlers[cc.METER][Meter.REPORT](driver, device, cmd)
+    energyMeterDefaults.zwave_handlers[cc.METER][Meter.REPORT](driver, device, cmd)
+  end
+end
+
+local function switch_report_handler(driver, device, cmd)
+  if (cmd.src_channel ~= 0) then
+    switchDefaults.zwave_handlers[cmd.cmd_class][cmd.cmd_id](driver, device, cmd)
+    powerMeterDefaults.zwave_handlers[cmd.cmd_class][cmd.cmd_id](driver, device, cmd)
+  end
+end
+
+-- Device appears to have some trouble with energy reset commands if the value is read too quickly
+local function reset(driver, device, command)
+  device.thread:call_with_delay(.5, function ()
+    device:send_to_component(Meter:Reset({}), command.component)
+  end)
+  device.thread:call_with_delay(1.5, function()
+    device:send_to_component(Meter:Get({scale = Meter.scale.electric_meter.KILOWATT_HOURS}), command.component)
+  end)
+end
+
 local multi_metering_switch = {
   NAME = "multi metering switch",
   capability_handlers = {
     [capabilities.refresh.ID] = {
       [capabilities.refresh.commands.refresh.NAME] = do_refresh
+    },
+    [capabilities.energyMeter.ID] = {
+      [capabilities.energyMeter.commands.resetEnergyMeter.NAME] = reset
+    },
+    [capabilities.switch.ID] = {
+      [capabilities.switch.commands.on.NAME] = switch_on_handler,
+      [capabilities.switch.commands.off.NAME] = switch_off_handler,
+    },
+    [capabilities.switchLevel.ID] = {
+      [capabilities.switchLevel.commands.setLevel.NAME] = set_level_handler,
+    },
+  },
+  zwave_handlers = {
+    [cc.METER] = {
+      [Meter.REPORT] = meter_report_handler
+    },
+    [cc.SWITCH_BINARY] = {
+      [SwitchBinary.REPORT] = switch_report_handler
+    },
+    [cc.BASIC] = {
+      [Basic.REPORT] = switch_report_handler
     }
   },
   lifecycle_handlers = {
